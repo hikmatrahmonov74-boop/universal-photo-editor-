@@ -1,46 +1,85 @@
+
 import os
+import io
 import threading
+import asyncio
+
 from flask import Flask
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-TOKEN = os.environ.get("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
+web = Flask(__name__)
 
-app = Flask(__name__)
-
-@app.route("/")
+@web.route("/")
 def home():
-    return "Universal Photo Editor is running!"
+    return "Photo Editor ishlayapti!"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Salom! Universal Photo Editor botiga xush kelibsiz!\n\n"
-        "Rasm yoki skrinshot yuboring.\n"
-        "Hozircha bot rasmlarni qabul qilishni sinovdan o'tkazmoqda."
-    )
+    await update.message.reply_text("Salom! Rasm yuboring.")
 
-async def photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Rasmingiz qabul qilindi! "
-        "Keyingi versiyada rasmni tahrirlash funksiyalarini qo'shamiz."
-    )
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    data = bytes(await file.download_as_bytearray())
+    context.user_data["photo"] = data
 
-def run_bot():
-    if not TOKEN:
-        print("BOT_TOKEN topilmadi!")
+    keyboard = [
+        [InlineKeyboardButton("Aylantirish", callback_data="rotate"),
+         InlineKeyboardButton("Akslantirish", callback_data="mirror")],
+        [InlineKeyboardButton("Oq-qora", callback_data="gray"),
+         InlineKeyboardButton("Tiniqlashtirish", callback_data="sharp")],
+        [InlineKeyboardButton("Yorqinlik", callback_data="bright"),
+         InlineKeyboardButton("Asl rasm", callback_data="original")]
+    ]
+    await update.message.reply_text("Tahrirlashni tanlang:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def edit_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = context.user_data.get("photo")
+    if not data:
+        await query.message.reply_text("Avval rasm yuboring.")
         return
 
-    bot = Application.builder().token(TOKEN).build()
-    bot.add_handler(CommandHandler("start", start))
-    bot.add_handler(MessageHandler(filters.PHOTO, photo))
-    bot.run_polling()
+    image = Image.open(io.BytesIO(data)).convert("RGB")
+    action = query.data
+
+    if action == "rotate":
+        image = image.rotate(90, expand=True)
+    elif action == "mirror":
+        image = ImageOps.mirror(image)
+    elif action == "gray":
+        image = ImageOps.grayscale(image)
+    elif action == "sharp":
+        image = image.filter(ImageFilter.SHARPEN)
+    elif action == "bright":
+        image = ImageEnhance.Brightness(image).enhance(1.2)
+
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=95)
+    output.seek(0)
+    await query.message.reply_photo(photo=output, caption="Tayyor!")
+
+async def bot():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN sozlanmagan!")
+
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(CallbackQueryHandler(edit_photo))
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    threading.Thread(target=run_bot, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    threading.Thread(
+        target=lambda: web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000))),
+        daemon=True
+    ).start()
+    asyncio.run(bot())
